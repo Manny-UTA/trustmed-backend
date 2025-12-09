@@ -58,7 +58,7 @@ interface ConcernAnalyzeResponse {
 
 //This tells the app where my backend server is running.
 //During development it's http://localhost:3000, but when deployed it becomes the live backend URL.
-const API_BASE_URL = 'http://localhost:3000';
+const API_BASE_URL = 'https://trustmedai.onrender.com';
 
 
 ///SymptomRating stores each symptom and the severity slider value.
