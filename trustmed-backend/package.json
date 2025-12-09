@@ -1,14 +1,14 @@
-
 {
   "name": "trustmed-backend",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "start": "node index.mjs",
     "dev": "node --env-file=.env index.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "dotenv": "^17.2.3",
+    "dotenv": "^16.4.5",
     "express": "^4.19.0"
   }
 }
