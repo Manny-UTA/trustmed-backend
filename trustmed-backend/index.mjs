@@ -22,7 +22,6 @@ app.use(express.json());
 ////These system prompts define how the LLM should behave for each endpoint///
 ////They strictly limit the model to structuring language, NOT diagnosing/////
 
-
 const SYSTEM_PROMPT = `
 You are the backend language engine for TrustMed AI, a mobile health education assistant.
 Your job is ONLY to help with language-based structuring of patient concerns.
@@ -57,12 +56,24 @@ interface ConcernAnalyzeResponse {
 }
 
 Constraints:
-- primaryCategory: short, human-readable label (e.g. "Chest pain").
-- candidateCategories: 1–5 short labels, primaryCategory should be first.
+- primaryCategory: must be a CONDITION or DISEASE name (e.g. "Strep Throat", "Cold/Flu", "Migraine"). NEVER a symptom like "Fever" or "Sore throat".
+- candidateCategories: must also be CONDITION or DISEASE names. NEVER symptoms. Provide 2-4 options.
 - clinicalSummary: 1–4 sentences, neutral and professional.
 - safetyNotes: 0–3 brief notes in general terms only.
 - Do NOT include any keys not listed in the interface.
 - Do NOT wrap the JSON in backticks or extra text.
+
+Example of CORRECT output for "I have a sore throat and fever":
+{
+  "primaryCategory": "Strep Throat",
+  "candidateCategories": ["Viral Pharyngitis", "Tonsillitis", "Mononucleosis"]
+}
+
+Example of INCORRECT output (never do this):
+{
+  "primaryCategory": "Sore throat",
+  "candidateCategories": ["Fever", "Swollen glands"]
+}
 `;
 
 const QUESTIONS_SYSTEM_PROMPT = `
@@ -101,8 +112,8 @@ interface GenerateQuestionsResponse {
 }
 
 - questions: 5–8 short questions, each a full sentence.
-- rationaleNotes: brief dev-facing notes explaining what each question is about (e.g. "clarifies red flags", "asks about testing").
-- safetyNotes: 0–3 short notes about potential risks, limitations, or things a developer should keep in mind.
+- rationaleNotes: brief dev-facing notes explaining what each question is about.
+- safetyNotes: 0–3 short notes about potential risks or limitations.
 
 Do NOT include any other keys.
 Do NOT wrap the JSON in backticks or any extra commentary.
@@ -133,8 +144,8 @@ You will receive:
 Your job:
 1) Write a short "summary" paragraph (1–3 sentences) restating the situation in plain language.
 2) Write an "analysis" paragraph (2–4 sentences) explaining in general what this risk level means and what the patient should be mindful of.
-3) Provide a cleaned-up list of "recommendations" that is consistent with the given recommendations.
-4) Write a clear "disclaimer" stating this is not medical advice or a diagnosis and does not replace a clinician.
+3) Provide a cleaned-up list of "recommendations" consistent with the given recommendations.
+4) Write a clear "disclaimer" stating this is not medical advice or a diagnosis.
 5) Optionally add 0–3 "safetyNotes" for developers (not shown directly to patients).
 6) Include the phrase "LLM_ACTIVE" in the summary so developers can confirm the LLM was used.
 
@@ -155,7 +166,6 @@ Do NOT wrap the JSON in backticks or extra text.
 `;
 
 ///Helpers//////
-///Helper to build a user-facing prompt for the concern-analyze endpoint///
 
 function buildUserPrompt(payload) {
   return [
@@ -177,11 +187,8 @@ function buildUserPrompt(payload) {
   ].join('\n');
 }
 
-///////validation helpers to keep bad requests from reaching the LLM///////
 function validateConcernRequest(body) {
-  if (!body || typeof body !== 'object') {
-    return 'Body must be a JSON object.';
-  }
+  if (!body || typeof body !== 'object') return 'Body must be a JSON object.';
   if (typeof body.freeTextConcern !== 'string' || body.freeTextConcern.trim().length < 10) {
     return 'freeTextConcern is required and must be at least 10 characters.';
   }
@@ -190,49 +197,28 @@ function validateConcernRequest(body) {
 
 function validateGenerateQuestionsRequest(body) {
   if (!body || typeof body !== 'object') return 'Body must be an object.';
-  if (typeof body.concernType !== 'string' || !body.concernType.trim()) {
-    return 'concernType is required and must be a non-empty string.';
-  }
-  if (typeof body.clinicalSummary !== 'string' || !body.clinicalSummary.trim()) {
-    return 'clinicalSummary is required and must be a non-empty string.';
-  }
+  if (typeof body.concernType !== 'string' || !body.concernType.trim()) return 'concernType is required.';
+  if (typeof body.clinicalSummary !== 'string' || !body.clinicalSummary.trim()) return 'clinicalSummary is required.';
   return null;
 }
 
 function validateFinalReportRequest(body) {
   if (!body || typeof body !== 'object') return 'Body must be an object.';
-  if (!['Low', 'Moderate', 'High'].includes(body.riskLevel)) {
-    return 'riskLevel must be Low, Moderate, or High.';
-  }
-  if (typeof body.concernType !== 'string' || !body.concernType.trim()) {
-    return 'concernType is required.';
-  }
-  if (typeof body.symptomSummary !== 'string' || !body.symptomSummary.trim()) {
-    return 'symptomSummary is required.';
-  }
-  if (!Array.isArray(body.redFlags) || !Array.isArray(body.recommendations)) {
-    return 'redFlags and recommendations must be arrays.';
-  }
+  if (!['Low', 'Moderate', 'High'].includes(body.riskLevel)) return 'riskLevel must be Low, Moderate, or High.';
+  if (typeof body.concernType !== 'string' || !body.concernType.trim()) return 'concernType is required.';
+  if (typeof body.symptomSummary !== 'string' || !body.symptomSummary.trim()) return 'symptomSummary is required.';
+  if (!Array.isArray(body.redFlags) || !Array.isArray(body.recommendations)) return 'redFlags and recommendations must be arrays.';
   return null;
 }
 
-////////Log API key presence////////////
-////////Quick sanity check so I know the .env is loaded correctly////
 console.log('API key loaded:', !!process.env.OPENAI_API_KEY);
 
 ////////Route: POST /v1/intake/concern-analyze////////////
-////////Step 1 backend: takes free-text concern and returns categories + clinical summary////////
 
 app.post('/v1/intake/concern-analyze', async (req, res) => {
   const error = validateConcernRequest(req.body);
-  if (error) {
-    return res.status(400).json({ error });
-  }
-
-  if (!process.env.OPENAI_API_KEY) {
-    console.error('Missing OPENAI_API_KEY');
-    return res.status(500).json({ error: 'Server configuration error.' });
-  }
+  if (error) return res.status(400).json({ error });
+  if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: 'Server configuration error.' });
 
   const payload = {
     sessionId: req.body.sessionId ?? null,
@@ -253,7 +239,7 @@ app.post('/v1/intake/concern-analyze', async (req, res) => {
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: 'gpt-5-nano',
+        model: 'gpt-4o-mini', // FIX: was gpt-5-nano
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
@@ -270,11 +256,7 @@ app.post('/v1/intake/concern-analyze', async (req, res) => {
 
     const data = await openaiResponse.json();
     const content = data.choices?.[0]?.message?.content;
-
-    if (!content) {
-      console.error('OpenAI returned no content (concern-analyze)', data);
-      return res.status(502).json({ error: 'LLM returned no content.' });
-    }
+    if (!content) return res.status(502).json({ error: 'LLM returned no content.' });
 
     let parsed;
     try {
@@ -284,17 +266,19 @@ app.post('/v1/intake/concern-analyze', async (req, res) => {
       return res.status(502).json({ error: 'LLM returned invalid JSON.' });
     }
 
-    if (!Array.isArray(parsed.candidateCategories)) {
-      parsed.candidateCategories = parsed.primaryCategory ? [parsed.primaryCategory] : [];
-    }
-    if (!Array.isArray(parsed.safetyNotes)) {
-      parsed.safetyNotes = [];
-    }
-    if (!parsed.sessionId && payload.sessionId) {
-      parsed.sessionId = payload.sessionId;
-    }
+    if (!Array.isArray(parsed.candidateCategories)) parsed.candidateCategories = [];
+    if (!Array.isArray(parsed.safetyNotes)) parsed.safetyNotes = [];
+    if (!parsed.sessionId && payload.sessionId) parsed.sessionId = payload.sessionId;
 
-    return res.json(parsed);
+    // FIX: transparency object restored
+    return res.json({
+      ...parsed,
+      transparency: {
+        systemPrompt: SYSTEM_PROMPT,
+        userPrompt,
+        model: 'gpt-4o-mini',
+      },
+    });
   } catch (err) {
     console.error('Unhandled server error (concern-analyze)', err);
     return res.status(500).json({ error: 'Internal server error.' });
@@ -302,19 +286,11 @@ app.post('/v1/intake/concern-analyze', async (req, res) => {
 });
 
 ////////Route: POST /v1/intake/generate-questions//////////////
-////////Step 4 backend: given a concern + summary, generate questions for the clinician////
-
 
 app.post('/v1/intake/generate-questions', async (req, res) => {
   const error = validateGenerateQuestionsRequest(req.body);
-  if (error) {
-    return res.status(400).json({ error });
-  }
-
-  if (!process.env.OPENAI_API_KEY) {
-    console.error('Missing OPENAI_API_KEY');
-    return res.status(500).json({ error: 'Server configuration error.' });
-  }
+  if (error) return res.status(400).json({ error });
+  if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: 'Server configuration error.' });
 
   const payload = {
     concernType: req.body.concernType,
@@ -324,10 +300,7 @@ app.post('/v1/intake/generate-questions', async (req, res) => {
     psychosocialFactorsMentioned: !!req.body.psychosocialFactorsMentioned,
   };
 
-  const userPrompt = [
-    'Concern and summary from TrustMed AI:',
-    JSON.stringify(payload, null, 2),
-  ].join('\n');
+  const userPrompt = ['Concern and summary from TrustMed AI:', JSON.stringify(payload, null, 2)].join('\n');
 
   try {
     const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -337,7 +310,7 @@ app.post('/v1/intake/generate-questions', async (req, res) => {
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: 'gpt-5-nano',
+        model: 'gpt-4o-mini', // FIX: was gpt-5-nano
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: QUESTIONS_SYSTEM_PROMPT },
@@ -354,17 +327,12 @@ app.post('/v1/intake/generate-questions', async (req, res) => {
 
     const data = await openaiResponse.json();
     const content = data.choices?.[0]?.message?.content;
-
-    if (!content) {
-      console.error('OpenAI returned no content (generate-questions)', data);
-      return res.status(502).json({ error: 'LLM returned no content.' });
-    }
+    if (!content) return res.status(502).json({ error: 'LLM returned no content.' });
 
     let parsed;
     try {
       parsed = JSON.parse(content);
     } catch (err) {
-      console.error('Failed to parse LLM JSON (generate-questions)', content);
       return res.status(502).json({ error: 'LLM returned invalid JSON.' });
     }
 
@@ -373,7 +341,14 @@ app.post('/v1/intake/generate-questions', async (req, res) => {
     if (!Array.isArray(parsed.safetyNotes)) parsed.safetyNotes = [];
     parsed.concernType = payload.concernType;
 
-    return res.json(parsed);
+    return res.json({
+      ...parsed,
+      transparency: {
+        systemPrompt: QUESTIONS_SYSTEM_PROMPT,
+        userPrompt,
+        model: 'gpt-4o-mini',
+      },
+    });
   } catch (err) {
     console.error('Unhandled server error (generate-questions)', err);
     return res.status(500).json({ error: 'Internal server error.' });
@@ -381,18 +356,11 @@ app.post('/v1/intake/generate-questions', async (req, res) => {
 });
 
 //////////Route: POST /v1/intake/final-report////////
-//////////Step 5 backend: rewrite the risk assessment into patient-facing text////////
 
 app.post('/v1/intake/final-report', async (req, res) => {
   const error = validateFinalReportRequest(req.body);
-  if (error) {
-    return res.status(400).json({ error });
-  }
-
-  if (!process.env.OPENAI_API_KEY) {
-    console.error('Missing OPENAI_API_KEY');
-    return res.status(500).json({ error: 'Server configuration error.' });
-  }
+  if (error) return res.status(400).json({ error });
+  if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: 'Server configuration error.' });
 
   const payload = {
     riskLevel: req.body.riskLevel,
@@ -415,7 +383,7 @@ app.post('/v1/intake/final-report', async (req, res) => {
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: 'gpt-5-nano',
+        model: 'gpt-4o-mini', // FIX: was gpt-5-nano
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: FINAL_REPORT_SYSTEM_PROMPT },
@@ -432,27 +400,28 @@ app.post('/v1/intake/final-report', async (req, res) => {
 
     const data = await openaiResponse.json();
     const content = data.choices?.[0]?.message?.content;
-
-    if (!content) {
-      console.error('OpenAI returned no content (final-report)', data);
-      return res.status(502).json({ error: 'LLM returned no content.' });
-    }
+    if (!content) return res.status(502).json({ error: 'LLM returned no content.' });
 
     let parsed;
     try {
       parsed = JSON.parse(content);
     } catch (err) {
-      console.error('Failed to parse LLM JSON (final-report)', content);
       return res.status(502).json({ error: 'LLM returned invalid JSON.' });
     }
 
     if (!Array.isArray(parsed.recommendations)) parsed.recommendations = [];
     if (!Array.isArray(parsed.safetyNotes)) parsed.safetyNotes = [];
-
     parsed.riskLevel = payload.riskLevel;
     parsed.concernType = payload.concernType;
 
-    return res.json(parsed);
+    return res.json({
+      ...parsed,
+      transparency: {
+        systemPrompt: FINAL_REPORT_SYSTEM_PROMPT,
+        userPrompt,
+        model: 'gpt-4o-mini',
+      },
+    });
   } catch (err) {
     console.error('Unhandled server error (final-report)', err);
     return res.status(500).json({ error: 'Internal server error.' });
@@ -460,7 +429,6 @@ app.post('/v1/intake/final-report', async (req, res) => {
 });
 
 /////////Start server/////////
-/////////Start the Express server so the web app can call these endpoints/////////
 
 app.listen(PORT, () => {
   console.log(`TrustMed AI backend running on http://localhost:${PORT}`);
